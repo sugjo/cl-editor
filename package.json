@@ -60,5 +60,8 @@
       "path": "./dist/index.min.js",
       "maxSize": "10 kB"
     }
-  ]
+  ],
+  "dependencies": {
+    "@lingui/core": "^3.13.3"
+  }
 }

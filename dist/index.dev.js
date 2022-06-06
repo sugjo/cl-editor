@@ -103,6 +103,10 @@
       return document.createElement(name);
     }
 
+    function svg_element(name) {
+      return document.createElementNS('http://www.w3.org/2000/svg', name);
+    }
+
     function text(data) {
       return document.createTextNode(data);
     }
@@ -146,21 +150,30 @@
     }
 
     function set_style(node, key, value, important) {
-      node.style.setProperty(key, value, important ? 'important' : '');
+      if (value === null) {
+        node.style.removeProperty(key);
+      } else {
+        node.style.setProperty(key, value, important ? 'important' : '');
+      }
     }
 
     function toggle_class(element, name, toggle) {
       element.classList[toggle ? 'add' : 'remove'](name);
     }
 
-    function custom_event(type, detail, bubbles = false) {
+    function custom_event(type, detail, {
+      bubbles = false,
+      cancelable = false
+    } = {}) {
       const e = document.createEvent('CustomEvent');
-      e.initCustomEvent(type, bubbles, false, detail);
+      e.initCustomEvent(type, bubbles, cancelable, detail);
       return e;
     }
 
     class HtmlTag {
-      constructor() {
+      constructor(is_svg = false) {
+        this.is_svg = false;
+        this.is_svg = is_svg;
         this.e = this.n = null;
       }
 
@@ -170,7 +183,7 @@
 
       m(html, target, anchor = null) {
         if (!this.e) {
-          this.e = element(target.nodeName);
+          if (this.is_svg) this.e = svg_element(target.nodeName);else this.e = element(target.nodeName);
           this.t = target;
           this.c(html);
         }
@@ -218,22 +231,30 @@
 
     function createEventDispatcher() {
       const component = get_current_component();
-      return (type, detail) => {
+      return (type, detail, {
+        cancelable = false
+      } = {}) => {
         const callbacks = component.$$.callbacks[type];
 
         if (callbacks) {
           // TODO are there situations where events could be dispatched
           // in a server (non-DOM) environment?
-          const event = custom_event(type, detail);
+          const event = custom_event(type, detail, {
+            cancelable
+          });
           callbacks.slice().forEach(fn => {
             fn.call(component, event);
           });
+          return !event.defaultPrevented;
         }
+
+        return true;
       };
     }
 
     function setContext(key, context) {
       get_current_component().$$.context.set(key, context);
+      return context;
     }
 
     const dirty_components = [];
@@ -253,25 +274,44 @@
     function add_render_callback(fn) {
       render_callbacks.push(fn);
     }
+    // 1. All beforeUpdate callbacks, in order: parents before children
+    // 2. All bind:this callbacks, in reverse order: children before parents.
+    // 3. All afterUpdate callbacks, in order: parents before children. EXCEPT
+    //    for afterUpdates called during the initial onMount, which are called in
+    //    reverse order: children before parents.
+    // Since callbacks might update component values, which could trigger another
+    // call to flush(), the following steps guard against this:
+    // 1. During beforeUpdate, any updated components will be added to the
+    //    dirty_components array and will cause a reentrant call to flush(). Because
+    //    the flush index is kept outside the function, the reentrant call will pick
+    //    up where the earlier call left off and go through all dirty components. The
+    //    current_component value is saved and restored so that the reentrant call will
+    //    not interfere with the "parent" flush() call.
+    // 2. bind:this callbacks cannot trigger new flush() calls.
+    // 3. During afterUpdate, any updated components will NOT have their afterUpdate
+    //    callback called a second time; the seen_callbacks set, outside the flush()
+    //    function, guarantees this behavior.
 
-    let flushing = false;
+
     const seen_callbacks = new Set();
+    let flushidx = 0; // Do *not* move this inside the flush() function
 
     function flush() {
-      if (flushing) return;
-      flushing = true;
+      const saved_component = current_component;
 
       do {
         // first, call beforeUpdate functions
         // and update components
-        for (let i = 0; i < dirty_components.length; i += 1) {
-          const component = dirty_components[i];
+        while (flushidx < dirty_components.length) {
+          const component = dirty_components[flushidx];
+          flushidx++;
           set_current_component(component);
           update(component.$$);
         }
 
         set_current_component(null);
         dirty_components.length = 0;
+        flushidx = 0;
 
         while (binding_callbacks.length) binding_callbacks.pop()(); // then, once components are updated, call
         // afterUpdate functions. This may cause
@@ -296,8 +336,8 @@
       }
 
       update_scheduled = false;
-      flushing = false;
       seen_callbacks.clear();
+      set_current_component(saved_component);
     }
 
     function update($$) {
@@ -735,255 +775,243 @@
     	'<svg viewBox="0 0 72 72" width="17px" height="100%"><path d="M30.9 49.1l-6.7 6.7c-.8.8-1.6.9-2.1.9s-1.4-.1-2.1-.9l-5.2-5.2c-1.1-1.1-1.1-3.1 0-4.2l6.1-6.1.2-.2 6.5-6.5c-1.2-.6-2.5-.9-3.8-.9-2.3 0-4.6.9-6.3 2.6L10.8 42c-3.5 3.5-3.5 9.2 0 12.7l5.2 5.2c1.7 1.7 4 2.6 6.3 2.6s4.6-.9 6.3-2.6l6.7-6.7C38 50.5 38.6 46.3 37 43l-6.1 6.1zM38.5 22.7l6.7-6.7c.8-.8 1.6-.9 2.1-.9s1.4.1 2.1.9l5.2 5.2c1.1 1.1 1.1 3.1 0 4.2l-6.1 6.1-.2.2-6.5 6.5c1.2.6 2.5.9 3.8.9 2.3 0 4.6-.9 6.3-2.6l6.7-6.7c3.5-3.5 3.5-9.2 0-12.7l-5.2-5.2c-1.7-1.7-4-2.6-6.3-2.6s-4.6.9-6.3 2.6l-6.7 6.7c-2.7 2.7-3.3 6.9-1.7 10.2l6.1-6.1z"></path><path d="M44.1 30.7c.2-.2.4-.6.4-.9 0-.3-.1-.6-.4-.9l-2.3-2.3c-.2-.2-.6-.4-.9-.4-.3 0-.6.1-.9.4L25.8 40.8c-.2.2-.4.6-.4.9 0 .3.1.6.4.9l2.3 2.3c.2.2.6.4.9.4.3 0 .6-.1.9-.4l14.2-14.2zM41.3 55.8v-5h22.2v5H41.3z"></path></svg>';
 
     var defaultActions = {
-    	viewHtml: {
-    		icon:
-    			'<svg viewBox="0 0 72 72" width="17px" height="100%"><path fill="none" stroke="currentColor" stroke-width="8" stroke-miterlimit="10" d="M26.9 17.9L9 36.2 26.9 54M45 54l17.9-18.3L45 17.9"></path></svg>',
-    		title: "View HTML",
-    		result: function() {
-    			let refs = get_store_value(this.references);
-    			let actionObj = get_store_value(this.state).actionObj;
-    			let helper = get_store_value(this.helper);
+        viewHtml: {
+            icon: '<svg viewBox="0 0 72 72" width="17px" height="100%"><path fill="none" stroke="currentColor" stroke-width="8" stroke-miterlimit="10" d="M26.9 17.9L9 36.2 26.9 54M45 54l17.9-18.3L45 17.9"></path></svg>',
+            title: "Просмотр в HTML",
+            result: function () {
+                let refs = get_store_value(this.references);
+                let actionObj = get_store_value(this.state).actionObj;
+                let helper = get_store_value(this.helper);
 
-    			helper.showEditor = !helper.showEditor;
-    			refs.editor.style.display = helper.showEditor ? "block" : "none";
-    			refs.raw.style.display = helper.showEditor ? "none" : "block";
-    			if (helper.showEditor) {
-    				refs.editor.innerHTML = refs.raw.value;
-    			} else {
-    				refs.raw.value = refs.editor.innerHTML;
-    			}
-    			setTimeout(() => {
-    				Object.keys(actionObj).forEach(
-    					action => (actionObj[action].disabled = !helper.showEditor)
-    				);
-    				actionObj.viewHtml.disabled = false;
-    				actionObj.viewHtml.active = !helper.showEditor;
+                helper.showEditor = !helper.showEditor;
+                refs.editor.style.display = helper.showEditor ? "block" : "none";
+                refs.raw.style.display = helper.showEditor ? "none" : "block";
+                if (helper.showEditor) {
+                    refs.editor.innerHTML = refs.raw.value;
+                } else {
+                    refs.raw.value = refs.editor.innerHTML;
+                }
+                setTimeout(() => {
+                    Object.keys(actionObj).forEach(
+                        (action) =>
+                            (actionObj[action].disabled = !helper.showEditor)
+                    );
+                    actionObj.viewHtml.disabled = false;
+                    actionObj.viewHtml.active = !helper.showEditor;
 
-    				this.state.update(state => {
-    					state.actionBtns = getActionBtns(actionObj);
-    					state.actionObj = actionObj;
-    					return state;
-    				});
-    			});
-    		}
-    	},
-    	undo: {
-    		icon:
-    			'<svg viewBox="0 0 72 72" width="17px" height="100%"><path d="M61.2 51.2c0-5.1-2.1-9.7-5.4-13.1-3.3-3.3-8-5.4-13.1-5.4H26.1v-12L10.8 36l15.3 15.3V39.1h16.7c3.3 0 6.4 1.3 8.5 3.5 2.2 2.2 3.5 5.2 3.5 8.5h6.4z"></path></svg>',
-    		title: "Undo",
-    		result: () => exec("undo")
-    	},
-    	redo: {
-    		icon:
-    			'<svg viewBox="0 0 72 72" width="17px" height="100%"><path d="M10.8 51.2c0-5.1 2.1-9.7 5.4-13.1 3.3-3.3 8-5.4 13.1-5.4H46v-12L61.3 36 45.9 51.3V39.1H29.3c-3.3 0-6.4 1.3-8.5 3.5-2.2 2.2-3.5 5.2-3.5 8.5h-6.5z"></path></svg>',
-    		title: "Redo",
-    		result: () => exec("redo")
-    	},
-    	b: {
-    		icon: "<b>B</b>",
-    		title: "Bold",
-    		result: () => exec("bold")
-    	},
-    	i: {
-    		icon: "<i>I</i>",
-    		title: "Italic",
-    		result: () => exec("italic")
-    	},
-    	u: {
-    		icon: "<u>U</u>",
-    		title: "Underline",
-    		result: () => exec("underline")
-    	},
-    	strike: {
-    		icon: "<strike>S</strike>",
-    		title: "Strike-through",
-    		result: () => exec("strikeThrough")
-    	},
-    	sup: {
-    		icon: "A<sup>2</sup>",
-    		title: "Superscript",
-    		result: () => exec("superscript")
-    	},
-    	sub: {
-    		icon: "A<sub>2</sub>",
-    		title: "Subscript",
-    		result: () => exec("subscript")
-    	},
-    	h1: {
-    		icon: "<b>H<sub>1</sub></b>",
-    		title: "Heading 1",
-    		result: () => exec("formatBlock", "<H1>")
-    	},
-    	h2: {
-    		icon: "<b>H<sub>2</sub></b>",
-    		title: "Heading 2",
-    		result: () => exec("formatBlock", "<H2>")
-    	},
-    	p: {
-    		icon: "&#182;",
-    		title: "Paragraph",
-    		result: () => exec("formatBlock", "<P>")
-    	},
-    	blockquote: {
-    		icon: "&#8220; &#8221;",
-    		title: "Quote",
-    		result: () => exec("formatBlock", "<BLOCKQUOTE>")
-    	},
-    	ol: {
-    		icon:
-    			'<svg viewBox="0 0 72 72" width="17px" height="100%"><path d="M27 14h36v8H27zM27 50h36v8H27zM27 32h36v8H27zM11.8 15.8V22h1.8v-7.8h-1.5l-2.1 1 .3 1.3zM12.1 38.5l.7-.6c1.1-1 2.1-2.1 2.1-3.4 0-1.4-1-2.4-2.7-2.4-1.1 0-2 .4-2.6.8l.5 1.3c.4-.3 1-.6 1.7-.6.9 0 1.3.5 1.3 1.1 0 .9-.9 1.8-2.6 3.3l-1 .9V40H15v-1.5h-2.9zM13.3 53.9c1-.4 1.4-1 1.4-1.8 0-1.1-.9-1.9-2.6-1.9-1 0-1.9.3-2.4.6l.4 1.3c.3-.2 1-.5 1.6-.5.8 0 1.2.3 1.2.8 0 .7-.8.9-1.4.9h-.7v1.3h.7c.8 0 1.6.3 1.6 1.1 0 .6-.5 1-1.4 1-.7 0-1.5-.3-1.8-.5l-.4 1.4c.5.3 1.3.6 2.3.6 2 0 3.2-1 3.2-2.4 0-1.1-.8-1.8-1.7-1.9z"></path></svg>',
-    		title: "Ordered List",
-    		result: () => exec("insertOrderedList")
-    	},
-    	ul: {
-    		icon:
-    			'<svg viewBox="0 0 72 72" width="17px" height="100%"><path d="M27 14h36v8H27zM27 50h36v8H27zM9 50h9v8H9zM9 32h9v8H9zM9 14h9v8H9zM27 32h36v8H27z"></path></svg>',
-    		title: "Unordered List",
-    		result: () => exec("insertUnorderedList")
-    	},
-    	hr: {
-    		icon: "&#8213;",
-    		title: "Horizontal Line",
-    		result: () => exec("insertHorizontalRule")
-    	},
-    	left: {
-    		icon:
-    			'<svg viewBox="0 0 72 72" width="17px" height="100%"><path d="M9 14h54v8H9zM9 50h54v8H9zM9 32h36v8H9z"></path></svg>',
-    		title: "Justify left",
-    		result: () => exec("justifyLeft")
-    	},
-    	right: {
-    		icon:
-    			'<svg viewBox="0 0 72 72" width="17px" height="100%"><path d="M9 14h54v8H9zM9 50h54v8H9zM27 32h36v8H27z"></path></svg>',
-    		title: "Justify right",
-    		result: () => exec("justifyRight")
-    	},
-    	center: {
-    		icon:
-    			'<svg viewBox="0 0 72 72" width="17px" height="100%"><path d="M9 14h54v8H9zM9 50h54v8H9zM18 32h36v8H18z"></path></svg>',
-    		title: "Justify center",
-    		result: () => exec("justifyCenter")
-    	},
-    	justify: {
-    		icon:
-    			'<svg viewBox="0 0 72 72" width="17px" height="100%"><path d="M9 14h54v8H9zM9 50h54v8H9zM9 32h54v8H9z"></path></svg>',
-    		title: "Justify full",
-    		result: () => exec("justifyFull")
-    	},
-    	a: {
-    		icon: linkSvg,
-    		title: "Insert link",
-    		result: function() {
-    			const actionObj = get_store_value(this.state).actionObj;
-    			const refs = get_store_value(this.references);
+                    this.state.update((state) => {
+                        state.actionBtns = getActionBtns(actionObj);
+                        state.actionObj = actionObj;
+                        return state;
+                    });
+                });
+            }
+        },
+        undo: {
+            icon: '<svg viewBox="0 0 72 72" width="17px" height="100%"><path d="M61.2 51.2c0-5.1-2.1-9.7-5.4-13.1-3.3-3.3-8-5.4-13.1-5.4H26.1v-12L10.8 36l15.3 15.3V39.1h16.7c3.3 0 6.4 1.3 8.5 3.5 2.2 2.2 3.5 5.2 3.5 8.5h6.4z"></path></svg>',
+            title: "Отменить ввод",
+            result: () => exec("undo")
+        },
+        redo: {
+            icon: '<svg viewBox="0 0 72 72" width="17px" height="100%"><path d="M10.8 51.2c0-5.1 2.1-9.7 5.4-13.1 3.3-3.3 8-5.4 13.1-5.4H46v-12L61.3 36 45.9 51.3V39.1H29.3c-3.3 0-6.4 1.3-8.5 3.5-2.2 2.2-3.5 5.2-3.5 8.5h-6.5z"></path></svg>',
+            title: "Вернуть ввод",
+            result: () => exec("redo")
+        },
+        b: {
+            icon: "<b>B</b>",
+            title: "Полужирный",
+            result: () => exec("bold")
+        },
+        i: {
+            icon: "<i>I</i>",
+            title: "Курсив",
+            result: () => exec("italic")
+        },
+        u: {
+            icon: "<u>U</u>",
+            title: "Подчёркнутый",
+            result: () => exec("underline")
+        },
+        strike: {
+            icon: "<strike>S</strike>",
+            title: "Перечёркнутый",
+            result: () => exec("strikeThrough")
+        },
+        sup: {
+            icon: "A<sup>2</sup>",
+            title: "Верхний индекс",
+            result: () => exec("superscript")
+        },
+        sub: {
+            icon: "A<sub>2</sub>",
+            title: "Нижний индекс",
+            result: () => exec("subscript")
+        },
+        h1: {
+            icon: "<b>H<sub>1</sub></b>",
+            title: "Заголовок 1",
+            result: () => exec("formatBlock", "<H1>")
+        },
+        h2: {
+            icon: "<b>H<sub>2</sub></b>",
+            title: "Заголовок 2",
+            result: () => exec("formatBlock", "<H2>")
+        },
+        p: {
+            icon: "&#182;",
+            title: "Параграф",
+            result: () => exec("formatBlock", "<P>")
+        },
+        blockquote: {
+            icon: "&#8220; &#8221;",
+            title: "Цитата",
+            result: () => exec("formatBlock", "<BLOCKQUOTE>")
+        },
+        ol: {
+            icon: '<svg viewBox="0 0 72 72" width="17px" height="100%"><path d="M27 14h36v8H27zM27 50h36v8H27zM27 32h36v8H27zM11.8 15.8V22h1.8v-7.8h-1.5l-2.1 1 .3 1.3zM12.1 38.5l.7-.6c1.1-1 2.1-2.1 2.1-3.4 0-1.4-1-2.4-2.7-2.4-1.1 0-2 .4-2.6.8l.5 1.3c.4-.3 1-.6 1.7-.6.9 0 1.3.5 1.3 1.1 0 .9-.9 1.8-2.6 3.3l-1 .9V40H15v-1.5h-2.9zM13.3 53.9c1-.4 1.4-1 1.4-1.8 0-1.1-.9-1.9-2.6-1.9-1 0-1.9.3-2.4.6l.4 1.3c.3-.2 1-.5 1.6-.5.8 0 1.2.3 1.2.8 0 .7-.8.9-1.4.9h-.7v1.3h.7c.8 0 1.6.3 1.6 1.1 0 .6-.5 1-1.4 1-.7 0-1.5-.3-1.8-.5l-.4 1.4c.5.3 1.3.6 2.3.6 2 0 3.2-1 3.2-2.4 0-1.1-.8-1.8-1.7-1.9z"></path></svg>',
+            title: "Упорядоченный список",
+            result: () => exec("insertOrderedList")
+        },
+        ul: {
+            icon: '<svg viewBox="0 0 72 72" width="17px" height="100%"><path d="M27 14h36v8H27zM27 50h36v8H27zM9 50h9v8H9zM9 32h9v8H9zM9 14h9v8H9zM27 32h36v8H27z"></path></svg>',
+            title: "Неупорядоченный список",
+            result: () => exec("insertUnorderedList")
+        },
+        hr: {
+            icon: "&#8213;",
+            title: "Горизонтальная линия",
+            result: () => exec("insertHorizontalRule")
+        },
+        left: {
+            icon: '<svg viewBox="0 0 72 72" width="17px" height="100%"><path d="M9 14h54v8H9zM9 50h54v8H9zM9 32h36v8H9z"></path></svg>',
+            title: "Выровнять по левому краю",
+            result: () => exec("justifyLeft")
+        },
+        right: {
+            icon: '<svg viewBox="0 0 72 72" width="17px" height="100%"><path d="M9 14h54v8H9zM9 50h54v8H9zM27 32h36v8H27z"></path></svg>',
+            title: "Выровнять по правому краю",
+            result: () => exec("justifyRight")
+        },
+        center: {
+            icon: '<svg viewBox="0 0 72 72" width="17px" height="100%"><path d="M9 14h54v8H9zM9 50h54v8H9zM18 32h36v8H18z"></path></svg>',
+            title: "Выровнять по центру",
+            result: () => exec("justifyCenter")
+        },
+        justify: {
+            icon: '<svg viewBox="0 0 72 72" width="17px" height="100%"><path d="M9 14h54v8H9zM9 50h54v8H9zM9 32h54v8H9z"></path></svg>',
+            title: "Выровнять по ширине",
+            result: () => exec("justifyFull")
+        },
+        a: {
+            icon: linkSvg,
+            title: "Вставить ссылку",
+            result: function () {
+                const actionObj = get_store_value(this.state).actionObj;
+                const refs = get_store_value(this.references);
 
-    			if (actionObj.a.active) {
-    				const selection = window.getSelection();
-    				const range = document.createRange();
-    				range.selectNodeContents(document.getSelection().focusNode);
-    				selection.removeAllRanges();
-    				selection.addRange(range);
-    				exec("unlink");
-    				actionObj.a.title = "Insert link";
-    				actionObj.a.icon = linkSvg;
-    				this.state.update(state => {
-    					state.actionBtn = getActionBtns(actionObj);
-    					state.actionObj = actionObj;
-    					return state;
-    				});
-    			} else {
-    				saveRange(refs.editor);
-    				refs.modal.$set({
-    					show: true,
-    					event: "linkUrl",
-    					title: "Insert link",
-    					label: "Url"
-    				});
-    				if (!get_store_value(this.helper).link) {
-    					this.helper.update(state => {
-    						state.link = true;
-    						return state;
-    					});
-    					refs.modal.$on("linkUrl", event => {
-    						restoreRange(refs.editor);
-    						exec("createLink", event.detail);
-    						actionObj.a.title = "Unlink";
-    						actionObj.a.icon = unlinkSvg;
+                if (actionObj.a.active) {
+                    const selection = window.getSelection();
+                    const range = document.createRange();
+                    range.selectNodeContents(document.getSelection().focusNode);
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                    exec("unlink");
+                    actionObj.a.title = "Insert link";
+                    actionObj.a.icon = linkSvg;
+                    this.state.update((state) => {
+                        state.actionBtn = getActionBtns(actionObj);
+                        state.actionObj = actionObj;
+                        return state;
+                    });
+                } else {
+                    saveRange(refs.editor);
+                    refs.modal.$set({
+                        show: true,
+                        event: "linkUrl",
+                        title: "Insert link",
+                        label: "Url"
+                    });
+                    if (!get_store_value(this.helper).link) {
+                        this.helper.update((state) => {
+                            state.link = true;
+                            return state;
+                        });
+                        refs.modal.$on("linkUrl", (event) => {
+                            restoreRange(refs.editor);
+                            exec("createLink", event.detail);
+                            actionObj.a.title = "Unlink";
+                            actionObj.a.icon = unlinkSvg;
 
-    						this.state.update(state => {
-    							state.actionBtn = getActionBtns(actionObj);
-    							state.actionObj = actionObj;
-    							return state;
-    						});
-    					});
-    				}
-    			}
-    		}
-    	},
-    	image: {
-    		icon:
-    			'<svg viewBox="0 0 72 72" width="17px" height="100%"><path d="M64 17v38H8V17h56m8-8H0v54h72V9z"></path><path d="M17.5 22C15 22 13 24 13 26.5s2 4.5 4.5 4.5 4.5-2 4.5-4.5-2-4.5-4.5-4.5zM16 50h27L29.5 32zM36 36.2l8.9-8.5L60.2 50H45.9S35.6 35.9 36 36.2z"></path></svg>',
-    		title: "Image",
-    		result: function() {
-    			const refs = get_store_value(this.references);
-    			saveRange(refs.editor);
-    			refs.modal.$set({
-    				show: true,
-    				event: "imageUrl",
-    				title: "Insert image",
-    				label: "Url"
-    			});
-    			if (!get_store_value(this.helper).image) {
-    				this.helper.update(state => {
-    					state.image = true;
-    					return state;
-    				});
-    				refs.modal.$on("imageUrl", event => {
-    					restoreRange(refs.editor);
-    					exec("insertImage", event.detail);
-    				});
-    			}
-    		}
-    	},
-    	forecolor: {
-    		icon:
-    			'<svg viewBox="0 0 72 72" width="17px" height="100%"><path d="M32 15h7.8L56 57.1h-7.9l-4-11.1H27.4l-4 11.1h-7.6L32 15zm-2.5 25.4h12.9L36 22.3h-.2l-6.3 18.1z"></path></svg>',
-    		title: "Text color",
-    		colorPicker: true,
-    		result: function() {
-    			showColorPicker.call(this, "foreColor");
-    		}
-    	},
-    	backcolor: {
-    		icon:
-    			'<svg viewBox="0 0 72 72" width="17px" height="100%"><path d="M36.5 22.3l-6.3 18.1H43l-6.3-18.1z"></path><path d="M9 8.9v54.2h54.1V8.9H9zm39.9 48.2L45 46H28.2l-3.9 11.1h-7.6L32.8 15h7.8l16.2 42.1h-7.9z"></path></svg>',
-    		title: "Background color",
-    		colorPicker: true,
-    		result: function() {
-    			showColorPicker.call(this, "backColor");
-    		}
-    	},
-    	removeFormat: {
-    		icon:
-    			'<svg viewBox="0 0 72 72" width="17px" height="100%"><path d="M58.2 54.6L52 48.5l3.6-3.6 6.1 6.1 6.4-6.4 3.8 3.8-6.4 6.4 6.1 6.1-3.6 3.6-6.1-6.1-6.4 6.4-3.7-3.8 6.4-6.4zM21.7 52.1H50V57H21.7zM18.8 15.2h34.1v6.4H39.5v24.2h-7.4V21.5H18.8v-6.3z"></path></svg>',
-    		title: "Remove format",
-    		result: function() {
-    			const refs = get_store_value(this.references);
-    			const selection = window.getSelection();
-    			if (!selection.toString().length) {
-    				removeBlockTagsRecursive(
-    					refs.editor.children,
-    					this.removeFormatTags
-    				);
-    				const range = document.createRange();
-    				range.selectNodeContents(refs.editor);
-    				selection.removeAllRanges();
-    				selection.addRange(range);
-    			}
-    			exec("removeFormat");
-    			selection.removeAllRanges();
-    		}
-    	}
+                            this.state.update((state) => {
+                                state.actionBtn = getActionBtns(actionObj);
+                                state.actionObj = actionObj;
+                                return state;
+                            });
+                        });
+                    }
+                }
+            }
+        },
+        image: {
+            icon: '<svg viewBox="0 0 72 72" width="17px" height="100%"><path d="M64 17v38H8V17h56m8-8H0v54h72V9z"></path><path d="M17.5 22C15 22 13 24 13 26.5s2 4.5 4.5 4.5 4.5-2 4.5-4.5-2-4.5-4.5-4.5zM16 50h27L29.5 32zM36 36.2l8.9-8.5L60.2 50H45.9S35.6 35.9 36 36.2z"></path></svg>',
+            title: "Вставить картинку",
+            result: function () {
+                const refs = get_store_value(this.references);
+                saveRange(refs.editor);
+                refs.modal.$set({
+                    show: true,
+                    event: "imageUrl",
+                    title: "Insert image",
+                    label: "Url"
+                });
+                if (!get_store_value(this.helper).image) {
+                    this.helper.update((state) => {
+                        state.image = true;
+                        return state;
+                    });
+                    refs.modal.$on("imageUrl", (event) => {
+                        restoreRange(refs.editor);
+                        exec("insertImage", event.detail);
+                    });
+                }
+            }
+        },
+        forecolor: {
+            icon: '<svg viewBox="0 0 72 72" width="17px" height="100%"><path d="M32 15h7.8L56 57.1h-7.9l-4-11.1H27.4l-4 11.1h-7.6L32 15zm-2.5 25.4h12.9L36 22.3h-.2l-6.3 18.1z"></path></svg>',
+            title: "Цвет текста",
+            colorPicker: true,
+            result: function () {
+                showColorPicker.call(this, "foreColor");
+            }
+        },
+        backcolor: {
+            icon: '<svg viewBox="0 0 72 72" width="17px" height="100%"><path d="M36.5 22.3l-6.3 18.1H43l-6.3-18.1z"></path><path d="M9 8.9v54.2h54.1V8.9H9zm39.9 48.2L45 46H28.2l-3.9 11.1h-7.6L32.8 15h7.8l16.2 42.1h-7.9z"></path></svg>',
+            title: "Цвет фона",
+            colorPicker: true,
+            result: function () {
+                showColorPicker.call(this, "backColor");
+            }
+        },
+        removeFormat: {
+            icon: '<svg viewBox="0 0 72 72" width="17px" height="100%"><path d="M58.2 54.6L52 48.5l3.6-3.6 6.1 6.1 6.4-6.4 3.8 3.8-6.4 6.4 6.1 6.1-3.6 3.6-6.1-6.1-6.4 6.4-3.7-3.8 6.4-6.4zM21.7 52.1H50V57H21.7zM18.8 15.2h34.1v6.4H39.5v24.2h-7.4V21.5H18.8v-6.3z"></path></svg>',
+            title: "Удалить форматирование",
+            result: function () {
+                const refs = get_store_value(this.references);
+                const selection = window.getSelection();
+                if (!selection.toString().length) {
+                    removeBlockTagsRecursive(
+                        refs.editor.children,
+                        this.removeFormatTags
+                    );
+                    const range = document.createRange();
+                    range.selectNodeContents(refs.editor);
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                }
+                exec("removeFormat");
+                selection.removeAllRanges();
+            }
+        }
     };
 
     const showColorPicker = function(cmd) {
@@ -1022,7 +1050,7 @@
     	}
     };
 
-    /* src/helpers/EditorModal.svelte generated by Svelte v3.44.2 */
+    /* src\helpers\EditorModal.svelte generated by Svelte v3.48.0 */
 
     function add_css$2(target) {
     	append_styles(target, "svelte-42yfje", ".cl-editor-modal.svelte-42yfje.svelte-42yfje{position:absolute;top:37px;left:50%;-webkit-transform:translateX(-50%);transform:translateX(-50%);max-width:520px;width:100%;height:140px;backface-visibility:hidden;z-index:11}.cl-editor-overlay.svelte-42yfje.svelte-42yfje{position:absolute;background-color:rgba(255,255,255,.5);height:100%;width:100%;left:0;top:0;z-index:10}.modal-box.svelte-42yfje.svelte-42yfje{position:absolute;top:0;left:50%;-webkit-transform:translateX(-50%);transform:translateX(-50%);max-width:500px;width:calc(100% - 20px);padding-bottom:36px;z-index:1;background-color:#FFF;text-align:center;font-size:14px;box-shadow:rgba(0,0,0,.2) 0 2px 3px;-webkit-backface-visibility:hidden;backface-visibility:hidden}.modal-title.svelte-42yfje.svelte-42yfje{font-size:24px;font-weight:700;margin:0 0 20px;padding:2px 0 4px;display:block;border-bottom:1px solid #EEE;color:#333;background:#fbfcfc}.modal-label.svelte-42yfje.svelte-42yfje{display:block;position:relative;margin:15px 12px;height:29px;line-height:29px;overflow:hidden}.modal-label.svelte-42yfje input.svelte-42yfje{position:absolute;top:0;right:0;height:27px;line-height:25px;border:1px solid #DEDEDE;background:#fff;font-size:14px;max-width:330px;width:70%;padding:0 7px;transition:all 150ms}.modal-label.svelte-42yfje input.svelte-42yfje:focus{outline:none}.input-error.svelte-42yfje input.svelte-42yfje{border:1px solid #e74c3c}.input-info.svelte-42yfje.svelte-42yfje{display:block;text-align:left;height:25px;line-height:25px;transition:all 150ms}.input-info.svelte-42yfje span.svelte-42yfje{display:block;color:#69878f;background-color:#fbfcfc;border:1px solid #DEDEDE;padding:1px 7px;width:150px}.input-error.svelte-42yfje .input-info.svelte-42yfje{margin-top:-29px}.input-error.svelte-42yfje .msg-error.svelte-42yfje{color:#e74c3c}.modal-button.svelte-42yfje.svelte-42yfje{position:absolute;bottom:10px;right:0;text-decoration:none;color:#FFF;display:block;width:100px;height:35px;line-height:33px;margin:0 10px;background-color:#333;border:none;cursor:pointer;font-family:\"Lato\",Helvetica,Verdana,sans-serif;font-size:16px;transition:all 150ms}.modal-submit.svelte-42yfje.svelte-42yfje{right:110px;background:#2bc06a}.modal-reset.svelte-42yfje.svelte-42yfje{color:#555;background:#e6e6e6}");
@@ -1385,7 +1413,7 @@
     	}
     }
 
-    /* src/helpers/EditorColorPicker.svelte generated by Svelte v3.44.2 */
+    /* src\helpers\EditorColorPicker.svelte generated by Svelte v3.48.0 */
 
     function add_css$1(target) {
     	append_styles(target, "svelte-njq4pk", ".color-picker-wrapper.svelte-njq4pk{border:1px solid #ecf0f1;border-top:none;background:#FFF;box-shadow:rgba(0,0,0,.1) 0 2px 3px;width:290px;left:50%;-webkit-transform:translateX(-50%);transform:translateX(-50%);padding:0;position:absolute;top:37px;z-index:11}.color-picker-overlay.svelte-njq4pk{position:absolute;background-color:rgba(255,255,255,.5);height:100%;width:100%;left:0;top:0;z-index:10}.color-picker-btn.svelte-njq4pk{display:block;position:relative;float:left;height:20px;width:20px;border:1px solid #333;padding:0;margin:2px;line-height:35px;text-decoration:none;background:#FFF;color:#333!important;cursor:pointer;text-align:left;font-size:15px;transition:all 150ms;line-height:20px;padding:0px 5px}.color-picker-btn.svelte-njq4pk:hover::after{content:\" \";display:block;position:absolute;top:-5px;left:-5px;height:27px;width:27px;background:inherit;border:1px solid #FFF;box-shadow:#000 0 0 2px;z-index:10}");
@@ -1584,7 +1612,7 @@
 
     const createStateStore = state;
 
-    /* src/Editor.svelte generated by Svelte v3.44.2 */
+    /* src\Editor.svelte generated by Svelte v3.48.0 */
 
     function add_css(target) {
     	append_styles(target, "svelte-1a534py", ".cl.svelte-1a534py .svelte-1a534py{box-sizing:border-box}.cl.svelte-1a534py.svelte-1a534py{box-shadow:0 2px 3px rgba(10, 10, 10, 0.1), 0 0 0 1px rgba(10, 10, 10, 0.1);box-sizing:border-box;width:100%;position:relative}.cl-content.svelte-1a534py.svelte-1a534py{height:300px;outline:0;overflow-y:auto;padding:10px;width:100%;background-color:white}.cl-actionbar.svelte-1a534py.svelte-1a534py{background-color:#ecf0f1;border-bottom:1px solid rgba(10, 10, 10, 0.1);width:100%}.cl-button.svelte-1a534py.svelte-1a534py{background-color:transparent;border:none;cursor:pointer;height:35px;outline:0;width:35px;vertical-align:top;position:relative}.cl-button.svelte-1a534py.svelte-1a534py:hover,.cl-button.active.svelte-1a534py.svelte-1a534py{background-color:#fff}.cl-button.svelte-1a534py.svelte-1a534py:disabled{opacity:.5;pointer-events:none}.cl-textarea.svelte-1a534py.svelte-1a534py{display:none;max-width:100%;min-width:100%;border:none;padding:10px}.cl-textarea.svelte-1a534py.svelte-1a534py:focus{outline:none}");
@@ -1615,7 +1643,7 @@
     	return {
     		c() {
     			button = element("button");
-    			html_tag = new HtmlTag();
+    			html_tag = new HtmlTag(false);
     			t = space();
     			html_tag.a = t;
     			attr(button, "type", "button");
